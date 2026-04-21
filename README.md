@@ -138,16 +138,31 @@ App runs at http://localhost:3000
 
 ---
 
-## Running Both at Once (Windows)
+## One-Click Startup (Windows)
 
-Create `start.bat` in the project root (already included):
+Use the included `start.bat` in the project root.
 
+What `start.bat` does:
+- Detects `winget` and attempts to install missing tools: Python, Node.js LTS, PostgreSQL, Redis-compatible Memurai
+- Starts PostgreSQL/Redis services if available
+- Creates `backend/.env` and `frontend/.env.local` from example files when missing
+- Creates `backend/venv` and installs backend requirements
+- Runs `npm install` in `frontend`
+- Tries to create database `ai_interview`
+- Starts backend and frontend in separate terminal windows
+
+Run:
 ```bat
-start "Backend" cmd /k "cd backend && venv\Scripts\activate && uvicorn app.main:app --reload --port 8000"
-start "Frontend" cmd /k "cd frontend && npm run dev"
+start.bat
 ```
 
-Double-click `start.bat` — opens two terminal windows, one per service.
+Or just double-click `start.bat` in File Explorer.
+
+Notes for first run:
+- Some installations/service operations may require running as Administrator
+- PostgreSQL setup may prompt for credentials during installation
+- You still need to set API keys in `backend/.env` for LLM/speech features
+- If `winget` is unavailable, install dependencies manually once (Python, Node, PostgreSQL, Redis)
 
 ---
 
