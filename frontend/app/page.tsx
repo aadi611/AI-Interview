@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Brain, Mic, Video, ChartBar, Code, Users, ArrowRight,
-  CheckCircle, Star, Zap, Shield, Globe
+  Zap, Shield
 } from "lucide-react";
 
 const features = [
@@ -23,13 +23,6 @@ const domains = [
   { name: "Frontend", color: "bg-pink-500/20 text-pink-400" },
   { name: "Backend", color: "bg-orange-500/20 text-orange-400" },
   { name: "Machine Learning", color: "bg-cyan-500/20 text-cyan-400" },
-];
-
-const stats = [
-  { value: "10K+", label: "Interviews Conducted" },
-  { value: "95%", label: "User Satisfaction" },
-  { value: "7", label: "Interview Domains" },
-  { value: "<1s", label: "Response Latency" },
 ];
 
 export default function LandingPage() {
@@ -59,7 +52,7 @@ export default function LandingPage() {
       </nav>
 
       {/* Hero */}
-      <section className="pt-32 pb-20 px-6">
+      <section className="pt-32 pb-12 px-6">
         <div className="max-w-4xl mx-auto text-center space-y-6">
           <Badge variant="outline" className="gap-1.5 py-1 px-3">
             <Zap className="w-3.5 h-3.5 text-yellow-400" />
@@ -119,20 +112,8 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Stats */}
-      <section className="py-16 border-y border-border/40 bg-muted/20">
-        <div className="max-w-4xl mx-auto px-6 grid grid-cols-2 md:grid-cols-4 gap-8">
-          {stats.map((s) => (
-            <div key={s.label} className="text-center">
-              <div className="text-3xl font-bold text-primary">{s.value}</div>
-              <div className="text-sm text-muted-foreground mt-1">{s.label}</div>
-            </div>
-          ))}
-        </div>
-      </section>
-
       {/* Features */}
-      <section id="features" className="py-24 px-6">
+      <section id="features" className="pt-16 pb-24 px-6">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-16">
             <h2 className="text-4xl font-bold mb-4">Everything You Need to Succeed</h2>
