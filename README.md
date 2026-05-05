@@ -40,7 +40,7 @@ A production-grade AI interview platform with real-time voice + chat, video reco
 
 ---
 
-## Prerequisites
+### Prerequisites
 
 Install these before starting:
 
