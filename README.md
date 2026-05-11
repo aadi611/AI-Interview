@@ -2,7 +2,7 @@
 
 A production-grade AI interview platform with real-time voice + chat, video recording, multi-domain intelligence, and LangGraph-powered adaptive questioning.
 
-###Screenshots
+### Screenshots
 
 ### Home Page
 ![Home Page](homepage.jpg)
