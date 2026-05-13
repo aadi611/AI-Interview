@@ -51,7 +51,7 @@ export default function DashboardPage() {
           </div>
           <div className="flex items-center gap-2">
             <Link href="/">
-              <Button variant="ghost" size="sm" className="gap-1.5">
+              <Button variant="ghost" size="sm" className="gap-1.6">
                 <Home className="w-4 h-4" />
                 Home
               </Button>
