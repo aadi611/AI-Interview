@@ -1,41 +1,124 @@
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 
-class InterviewState(TypedDict, total=False):
-    # Identity
-    session_id: str
-    user_name: str
-    domain: str
-    difficulty: str
+# ============================================================
+# Shared Types
+# ============================================================
 
-    # Conversation — plain dicts {role, content}, no LangChain reducer
-    messages: list[dict]
+Role = Literal["system", "user", "assistant"]
+Difficulty = Literal["easy", "medium", "hard"]
+InterviewStage = Literal[
+    "onboarding",
+    "profile",
+    "questioning",
+    "evaluating",
+    "done",
+]
 
-    # Candidate profile (filled during onboarding)
-    onboarding_turns: int
-    candidate_background: str
-    profile_summary: str  # distilled bullet points about experience
 
-    # Interview progress — dynamic questions now, not pre-generated
-    current_question_index: int
-    questions: list[dict]  # accumulated as the interview progresses
-    answers: list[dict]
-    follow_up_count: int
-    max_questions: int
+# ============================================================
+# Conversation
+# ============================================================
 
-    # Adaptive difficulty
-    consecutive_correct: int
-    consecutive_wrong: int
+class Message(TypedDict):
+    role: Role
+    content: str
 
-    # Evaluation
-    evaluation_complete: bool
-    final_score: float
+
+# ============================================================
+# Candidate
+# ============================================================
+
+class CandidateProfile(TypedDict, total=False):
+    name: str
+    background: str
+    summary: str
+
+
+# ============================================================
+# Interview
+# ============================================================
+
+class Question(TypedDict):
+    id: str
+    text: str
+    difficulty: Difficulty
+    topic: str
+
+
+class Answer(TypedDict):
+    question_id: str
+    text: str
+    score: float
+    feedback: str
+    is_correct: bool
+
+
+# ============================================================
+# Evaluation
+# ============================================================
+
+class Evaluation(TypedDict, total=False):
+    score: float
     strengths: list[str]
     weaknesses: list[str]
     improvements: list[str]
-    overall_feedback: str
+    feedback: str
 
-    # Flow control — stage drives routing
-    # onboarding | profile | questioning | evaluating | done
-    stage: str
+
+# ============================================================
+# Main Interview State
+# ============================================================
+
+class InterviewState(TypedDict, total=False):
+
+    # --------------------------------------------------------
+    # Session
+    # --------------------------------------------------------
+    session_id: str
+
+    # --------------------------------------------------------
+    # Interview Configuration
+    # --------------------------------------------------------
+    domain: str
+    difficulty: Difficulty
+    max_questions: int
+
+    # --------------------------------------------------------
+    # Conversation
+    # --------------------------------------------------------
+    messages: list[Message]
+
+    # --------------------------------------------------------
+    # Candidate Profile
+    # --------------------------------------------------------
+    candidate: CandidateProfile
+    onboarding_turns: int
+
+    # --------------------------------------------------------
+    # Interview Flow
+    # --------------------------------------------------------
+    stage: InterviewStage
+
+    # Questions are generated dynamically during the interview.
+    questions: list[Question]
+    answers: list[Answer]
+
+    # Number of follow-ups for the current question.
+    follow_up_count: int
+
+    # --------------------------------------------------------
+    # Adaptive Difficulty
+    # --------------------------------------------------------
+    consecutive_correct: int
+    consecutive_wrong: int
+
+    # --------------------------------------------------------
+    # Final Evaluation
+    # --------------------------------------------------------
+    evaluation: Evaluation
+
+    # --------------------------------------------------------
+    # Flow Control
+    # --------------------------------------------------------
     should_continue: bool
