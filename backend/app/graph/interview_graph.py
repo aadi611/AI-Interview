@@ -27,6 +27,7 @@ _END_INTENT_RE = re.compile(
 def _wants_to_end(text: str) -> bool:
     if not text:
         return False
+    print(_wants_to_end)
     return bool(_END_INTENT_RE.search(text))
 
 
