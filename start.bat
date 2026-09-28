@@ -132,7 +132,7 @@ if errorlevel 1 (
 ) else (
 	echo [OK] Installed %DISPLAY_NAME%.
 )
-goto :eof
+goto :eofo
 
 :install_redis_if_missing
 where redis-server >nul 2>nul
