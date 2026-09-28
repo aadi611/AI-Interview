@@ -1,7 +1,6 @@
 # InterviewAI : Full-Stack AI Interview Platform
 
-A production-grade AI interview platform with real-time voice + chat, video recording, multi-domain intelligence, and LangGraph-powered adaptive questioning.
-
+A production-grade AI interview platform with real-time voice + chat, video recording, multi-domain intelligence, and LangGraph-powered adaptive questioning
 ### Screenshot
 
 ### Home Page
