@@ -1,19 +1,91 @@
 """
 Admin-only endpoints. All routes require is_admin=True on the authenticated user.
 """
+import asyncio
+import mimetypes
+from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
+from typing import Iterable
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
 
+from app.api.routes.auth import get_current_admin
+from app.config import settings
 from app.core.database import get_db
 from app.models.session import InterviewSession, InterviewStatus
 from app.models.user import User
-from app.api.routes.auth import get_current_admin
-from app.config import settings
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_current_admin)])
+
+DEFAULT_RECORDING_MEDIA_TYPE = "video/webm"
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+def _iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt else None
+
+
+def _recording_filename(url: str | None) -> str | None:
+    return url.rsplit("/", 1)[-1] if url else None
+
+
+@lru_cache(maxsize=1)
+def _storage_root() -> Path:
+    return Path(settings.STORAGE_LOCAL_PATH).resolve()
+
+
+def _resolve_recording(filename: str | None) -> Path | None:
+    """Return the on-disk path for a bare filename, or None if it is unsafe.
+
+    Rejects empty names, '.', '..', anything containing a path separator,
+    and anything that resolves (e.g. via symlink) outside the storage root.
+    """
+    if not filename or filename in {".", ".."} or Path(filename).name != filename:
+        return None
+    root = _storage_root()
+    path = (root / filename).resolve()
+    return path if path.parent == root else None
+
+
+def _recording_path_or_400(filename: str) -> Path:
+    path = _resolve_recording(filename)
+    if path is None:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    return path
+
+
+def _unlink_quietly(paths: Iterable[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass  # best effort; the DB is already the source of truth
+
+
+async def _remove_recordings(urls: Iterable[str | None]) -> None:
+    """Delete recording files off the event loop. Call only after commit."""
+    paths = [p for p in (_resolve_recording(_recording_filename(u)) for u in urls) if p]
+    if paths:
+        await asyncio.to_thread(_unlink_quietly, paths)
+
+
+async def _get_user_or_404(db: AsyncSession, user_id: str) -> User:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+def _forbid_self(admin: User, user_id: str, action: str) -> None:
+    if admin.id == user_id:
+        raise HTTPException(status_code=400, detail=f"You cannot {action} your own account")
 
 
 def _serialize_session(s: InterviewSession, user: User | None = None) -> dict:
@@ -28,9 +100,9 @@ def _serialize_session(s: InterviewSession, user: User | None = None) -> dict:
         "mode": s.mode,
         "evaluation": s.evaluation,
         "recording_url": s.recording_url,
-        "created_at": s.created_at.isoformat() if s.created_at else None,
-        "started_at": s.started_at.isoformat() if s.started_at else None,
-        "completed_at": s.completed_at.isoformat() if s.completed_at else None,
+        "created_at": _iso(s.created_at),
+        "started_at": _iso(s.started_at),
+        "completed_at": _iso(s.completed_at),
     }
 
 
@@ -40,191 +112,222 @@ def _serialize_user(u: User, session_count: int = 0) -> dict:
         "name": u.name,
         "email": u.email,
         "is_admin": bool(u.is_admin),
-        "created_at": u.created_at.isoformat() if u.created_at else None,
+        "created_at": _iso(u.created_at),
         "session_count": session_count,
     }
 
 
+def _sessions_with_users():
+    return (
+        select(InterviewSession, User)
+        .join(User, User.id == InterviewSession.user_id)
+        .order_by(desc(InterviewSession.created_at))
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Stats
+# --------------------------------------------------------------------------- #
+
 @router.get("/stats")
 async def platform_stats(db: AsyncSession = Depends(get_db)):
-    """Aggregate platform statistics across all users."""
-    total_users = (await db.execute(select(func.count(User.id)))).scalar_one()
-    total_sessions = (await db.execute(select(func.count(InterviewSession.id)))).scalar_one()
-    completed = (await db.execute(
-        select(func.count(InterviewSession.id)).where(
-            InterviewSession.status == InterviewStatus.COMPLETED
-        )
-    )).scalar_one()
-    in_progress = (await db.execute(
-        select(func.count(InterviewSession.id)).where(
-            InterviewSession.status == InterviewStatus.IN_PROGRESS
-        )
-    )).scalar_one()
+    """Aggregate platform statistics across all users (2 queries instead of 5)."""
+    total_users = (await db.execute(select(func.count()).select_from(User))).scalar_one()
 
-    # Sessions per domain
-    by_domain_rows = (await db.execute(
-        select(InterviewSession.domain, func.count(InterviewSession.id))
-        .group_by(InterviewSession.domain)
+    rows = (await db.execute(
+        select(InterviewSession.domain, InterviewSession.status, func.count())
+        .group_by(InterviewSession.domain, InterviewSession.status)
     )).all()
-    by_domain = {row[0]: row[1] for row in by_domain_rows}
+
+    by_domain: dict = {}
+    total = completed = in_progress = 0
+    for domain, status, n in rows:
+        by_domain[domain] = by_domain.get(domain, 0) + n
+        total += n
+        if status == InterviewStatus.COMPLETED:
+            completed += n
+        elif status == InterviewStatus.IN_PROGRESS:
+            in_progress += n
 
     return {
         "total_users": total_users,
-        "total_sessions": total_sessions,
+        "total_sessions": total,
         "completed_sessions": completed,
         "in_progress_sessions": in_progress,
         "by_domain": by_domain,
     }
 
 
+# --------------------------------------------------------------------------- #
+# Users
+# --------------------------------------------------------------------------- #
+
 @router.get("/users")
-async def list_users(db: AsyncSession = Depends(get_db)):
-    """List all users along with their session count."""
+async def list_users(
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """List users with their session count."""
+    counts = (
+        select(InterviewSession.user_id, func.count().label("n"))
+        .group_by(InterviewSession.user_id)
+        .subquery()
+    )
     rows = (await db.execute(
-        select(User, func.count(InterviewSession.id))
-        .outerjoin(InterviewSession, InterviewSession.user_id == User.id)
-        .group_by(User.id)
+        select(User, func.coalesce(counts.c.n, 0))
+        .outerjoin(counts, counts.c.user_id == User.id)
         .order_by(desc(User.created_at))
+        .limit(limit)
+        .offset(offset)
     )).all()
-    return [_serialize_user(u, count) for (u, count) in rows]
+    return [_serialize_user(u, n) for (u, n) in rows]
+
+
+async def _set_admin(db: AsyncSession, user_id: str, value: bool) -> dict:
+    user = await _get_user_or_404(db, user_id)
+    if bool(user.is_admin) != value:
+        user.is_admin = value
+        await db.commit()
+    return {"ok": True, "user_id": user.id, "is_admin": value}
 
 
 @router.post("/users/{user_id}/promote")
 async def promote_user(user_id: str, db: AsyncSession = Depends(get_db)):
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    user.is_admin = True
-    await db.commit()
-    return {"ok": True, "user_id": user.id, "is_admin": True}
+    return await _set_admin(db, user_id, True)
 
 
 @router.post("/users/{user_id}/demote")
-async def demote_user(user_id: str, db: AsyncSession = Depends(get_db)):
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    user.is_admin = False
-    await db.commit()
-    return {"ok": True, "user_id": user.id, "is_admin": False}
+async def demote_user(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    _forbid_self(admin, user_id, "demote")
+    return await _set_admin(db, user_id, False)
 
 
 @router.delete("/users/{user_id}")
-async def delete_user(user_id: str, db: AsyncSession = Depends(get_db)):
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    # Clear out sessions first to avoid FK issues.
-    await db.execute(
-        InterviewSession.__table__.delete().where(InterviewSession.user_id == user_id)
-    )
+async def delete_user(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    _forbid_self(admin, user_id, "delete")
+    user = await _get_user_or_404(db, user_id)
+
+    recording_urls = (await db.execute(
+        select(InterviewSession.recording_url).where(
+            InterviewSession.user_id == user_id,
+            InterviewSession.recording_url.is_not(None),
+        )
+    )).scalars().all()
+
+    await db.execute(delete(InterviewSession).where(InterviewSession.user_id == user_id))
     await db.delete(user)
     await db.commit()
+
+    await _remove_recordings(recording_urls)
     return {"ok": True}
 
+
+# --------------------------------------------------------------------------- #
+# Sessions
+# --------------------------------------------------------------------------- #
 
 @router.get("/sessions")
 async def list_all_sessions(
     db: AsyncSession = Depends(get_db),
     user_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ):
-    """List every session across all users. Optionally filter by user_id."""
-    stmt = (
-        select(InterviewSession, User)
-        .join(User, User.id == InterviewSession.user_id)
-        .order_by(desc(InterviewSession.created_at))
-        .limit(limit)
-    )
+    """List sessions across all users. Optionally filter by user_id."""
+    stmt = _sessions_with_users()
     if user_id:
         stmt = stmt.where(InterviewSession.user_id == user_id)
-    rows = (await db.execute(stmt)).all()
+    rows = (await db.execute(stmt.limit(limit).offset(offset))).all()
     return [_serialize_session(s, u) for (s, u) in rows]
 
 
 @router.get("/sessions/{session_id}")
 async def get_any_session(session_id: str, db: AsyncSession = Depends(get_db)):
     row = (await db.execute(
-        select(InterviewSession, User)
-        .join(User, User.id == InterviewSession.user_id)
-        .where(InterviewSession.id == session_id)
+        _sessions_with_users().where(InterviewSession.id == session_id)
     )).first()
     if not row:
         raise HTTPException(status_code=404, detail="Session not found")
     s, u = row
-    result = _serialize_session(s, u)
-    result["transcript"] = s.transcript
-    return result
+    return {**_serialize_session(s, u), "transcript": s.transcript}
 
 
 @router.delete("/sessions/{session_id}")
 async def delete_any_session(session_id: str, db: AsyncSession = Depends(get_db)):
-    s = (await db.execute(
-        select(InterviewSession).where(InterviewSession.id == session_id)
-    )).scalar_one_or_none()
+    s = await db.get(InterviewSession, session_id)
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Best-effort remove the recording file from disk if present.
-    if s.recording_url:
-        try:
-            filename = s.recording_url.rsplit("/", 1)[-1]
-            path = Path(settings.STORAGE_LOCAL_PATH) / filename
-            if path.exists():
-                path.unlink()
-        except Exception:
-            pass
-
+    recording_url = s.recording_url
     await db.delete(s)
     await db.commit()
+
+    await _remove_recordings([recording_url])
     return {"ok": True}
 
 
+# --------------------------------------------------------------------------- #
+# Recordings
+# --------------------------------------------------------------------------- #
+
 @router.get("/recordings")
-async def list_recordings(db: AsyncSession = Depends(get_db)):
-    """List every session that has a recording file."""
+async def list_recordings(
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List sessions that have a recording file."""
     rows = (await db.execute(
-        select(InterviewSession, User)
-        .join(User, User.id == InterviewSession.user_id)
+        _sessions_with_users()
         .where(InterviewSession.recording_url.is_not(None))
-        .order_by(desc(InterviewSession.created_at))
+        .limit(limit)
+        .offset(offset)
     )).all()
     return [
-        {
-            **_serialize_session(s, u),
-            "filename": s.recording_url.rsplit("/", 1)[-1] if s.recording_url else None,
-        }
+        {**_serialize_session(s, u), "filename": _recording_filename(s.recording_url)}
         for (s, u) in rows
     ]
 
 
 @router.get("/recordings/{filename}")
 async def download_recording(filename: str):
-    """Admins can stream any recording file by name."""
-    # Reject path traversal attempts.
-    safe = Path(filename).name
-    if safe != filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    path = Path(settings.STORAGE_LOCAL_PATH) / safe
-    if not path.exists():
+    """Stream any recording file by name."""
+    path = _recording_path_or_400(filename)
+    if not path.is_file():
         raise HTTPException(status_code=404, detail="Recording not found")
-    return FileResponse(path, media_type="video/webm")
+    media_type = mimetypes.guess_type(path.name)[0] or DEFAULT_RECORDING_MEDIA_TYPE
+    return FileResponse(path, media_type=media_type)
 
 
 @router.delete("/recordings/{filename}")
 async def delete_recording(filename: str, db: AsyncSession = Depends(get_db)):
-    safe = Path(filename).name
-    if safe != filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    path = Path(settings.STORAGE_LOCAL_PATH) / safe
-    if path.exists():
-        path.unlink()
+    path = _recording_path_or_400(filename)
 
-    # Clear the recording_url on any matching session row.
-    rows = (await db.execute(
-        select(InterviewSession).where(InterviewSession.recording_url.like(f"%{safe}"))
+    # Exact filename match only: no LIKE wildcards, no suffix collisions.
+    sessions = (await db.execute(
+        select(InterviewSession).where(or_(
+            InterviewSession.recording_url == filename,
+            InterviewSession.recording_url.endswith(f"/{filename}", autoescape=True),
+        ))
     )).scalars().all()
-    for s in rows:
+
+    file_exists = await asyncio.to_thread(path.is_file)
+    if not sessions and not file_exists:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    for s in sessions:
         s.recording_url = None
     await db.commit()
+
+    if file_exists:
+        await asyncio.to_thread(_unlink_quietly, [path])
     return {"ok": True}
